@@ -2,8 +2,10 @@ package at.ac.tuwien.owltomysql;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 import com.hp.hpl.jena.ontology.OntClass;
 import com.hp.hpl.jena.ontology.OntModel;
@@ -59,8 +61,8 @@ public class OwlToMySQL {
      * 
      * @return List of TableWrapper (Table Script Creator)
      */
-    public List<TableWrapper> transform() {
-        List<TableWrapper> tableScripts = new ArrayList<TableWrapper>();
+    public Map<String, TableWrapper> transform() {
+        Map<String, TableWrapper> tableScripts = new HashMap<String, TableWrapper>();
 
         dataset.begin(ReadWrite.READ);
 
@@ -88,20 +90,19 @@ public class OwlToMySQL {
                 OntProperty prop = listProps.next();
                 if (prop.isAnon())
                     continue;
-                String prop_id = model.getNsURIPrefix(prop.getNameSpace()) + "_" + prop.getLocalName();
-                tableScript.append(prop_id).append(" ").append(" VARCHAR(80), ");
-                tableScript.append(System.getProperty("line.separator"));
 
-                if (prop.isObjectProperty()) {
-                    // add foreign key
-                    OntResource range = prop.getRange();
-                    if (range.isAnon())
-                        continue;
-                    String range_id = model.getNsURIPrefix(range.getNameSpace()) + "_" + range.getLocalName();
-                    tableScript.append("FOREIGN KEY ").append("(" + prop_id + ")").append(" REFERENCES ")
-                            .append(range_id).append("(" + range_id + "_id), ");
+                if (prop.isFunctionalProperty() || cls.getCardinality(prop) == 1) {
+                    String prop_id = model.getNsURIPrefix(prop.getNameSpace()) + "_" + prop.getLocalName();
+                    tableScript.append(prop_id).append(" ").append(" VARCHAR(80), ");
                     tableScript.append(System.getProperty("line.separator"));
-                    fk.add(range_id);
+
+                    if (prop.isObjectProperty()) {
+                        processObjectProperty(prop, model, tableScript, fk);
+                    }
+                } else {
+                    TableWrapper tws = handleNonFuncProperty(m, cls, prop);
+                    if (!tableScripts.containsKey(tws.getTableName().toLowerCase()))
+                        tableScripts.put(tws.getTableName().toLowerCase(), tws);
                 }
             }
 
@@ -112,13 +113,65 @@ public class OwlToMySQL {
             tableScript.append(System.getProperty("line.separator"));
             tableScript.append(System.getProperty("line.separator"));
 
-            TableWrapper tw = new TableWrapper(cls_id, tableScript.toString(), fk);
-            tableScripts.add(tw);
+            if (!tableScripts.containsKey(cls_id.toLowerCase())) {
+                TableWrapper tw = new TableWrapper(cls_id, tableScript.toString(), fk);
+                tableScripts.put(cls_id.toLowerCase(), tw);
+            }
         }
 
         dataset.end();
 
         return tableScripts;
+    }
+
+    private TableWrapper handleNonFuncProperty(Model model, OntClass cls, OntProperty prop) {
+        List<String> fk = new ArrayList<String>();
+
+        StringBuilder tableScript = new StringBuilder();
+        tableScript.append("CREATE TABLE ");
+        String tableName = model.getNsURIPrefix(cls.getNameSpace()) + "_" + cls.getLocalName() + "__"
+                + prop.getLocalName();
+        String domainTable = cls.getLocalName();
+
+        tableScript.append(tableName);
+        tableScript.append("( ");
+        tableScript.append(System.getProperty("line.separator"));
+        tableScript.append(tableName + "_id").append(" INT(11) NOT NULL, ");
+        tableScript.append(System.getProperty("line.separator"));
+        tableScript.append(domainTable + "id").append(" VARCHAR(80) NOT NULL, ");
+
+        String prop_id = model.getNsURIPrefix(prop.getNameSpace()) + "_" + prop.getLocalName();
+        tableScript.append(prop_id).append(" ").append(" VARCHAR(80), ");
+        tableScript.append(System.getProperty("line.separator"));
+
+        if (prop.isObjectProperty()) {
+            processObjectProperty(prop, model, tableScript, fk);
+        }
+
+        tableScript.append("PRIMARY KEY (").append(tableName + "_id").append(") ");
+        tableScript.append(System.getProperty("line.separator"));
+        tableScript.append(" ); ");
+        tableScript.append(System.getProperty("line.separator"));
+        tableScript.append(System.getProperty("line.separator"));
+
+        TableWrapper wrapper = new TableWrapper(tableName, tableScript.toString(), fk);
+
+        return wrapper;
+    }
+
+    public void processObjectProperty(OntProperty prop, Model model, StringBuilder tableScript, List<String> fk) {
+        String prop_id = model.getNsURIPrefix(prop.getNameSpace()) + "_" + prop.getLocalName();
+        ExtendedIterator<? extends OntResource> iter = prop.listRange();
+        while (iter.hasNext()) {
+            OntResource range = iter.next();
+            if (!range.isAnon()) {
+                String range_id = model.getNsURIPrefix(range.getNameSpace()) + "_" + range.getLocalName();
+                tableScript.append("FOREIGN KEY ").append("(" + prop_id + ")").append(" REFERENCES ").append(range_id)
+                        .append("(" + range_id + "_id), ");
+                tableScript.append(System.getProperty("line.separator"));
+                fk.add(range_id);
+            }
+        }
     }
 
     /**
@@ -147,15 +200,5 @@ public class OwlToMySQL {
         }
 
         return sb.toString();
-    }
-
-    public static void main(String[] args) {
-        String owl = "data/gate_control";
-        OwlToMySQL converter = new OwlToMySQL(owl);
-        converter.initWithOwlFile(owl + ".owl");
-        List<TableWrapper> scripts = converter.transform();
-        String s = converter.reorderScripts(scripts);
-
-        System.out.println(s);
     }
 }
